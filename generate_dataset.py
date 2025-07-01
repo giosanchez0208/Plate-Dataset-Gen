@@ -5,15 +5,34 @@ import cv2
 import numpy as np
 from color_smart import get_average_color_in_region, get_readable_color
 from augmentations import LicensePlateAugmentations
+import uuid
+from itertools import product
+import concurrent.futures
+import threading
+from tqdm import tqdm
+
+os.makedirs("dataset/images", exist_ok=True)
+os.makedirs("dataset/labels", exist_ok=True)
 
 # initializations
 characters = [chr(c) for c in range(ord('A'), ord('Z') + 1)] + [str(d) for d in range(10)]
+char_to_class = {char: idx for idx, char in enumerate(characters)}
 WIDTH, HEIGHT = 512, 512
 background_files = [f for f in os.listdir("backgrounds")
                     if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.gif'))]
 font_files = [f for f in os.listdir("fonts")
               if f.lower().endswith(('.ttf', '.otf'))]
 
+# for threading
+file_lock = threading.Lock()
+
+def thread_safe_save(image_cv, annotations, file_id, variation_idx):
+    with file_lock:
+        cv2.imwrite(f"dataset/images/{file_id}_{variation_idx}.jpg", image_cv)
+        with open(f"dataset/labels/{file_id}_{variation_idx}.txt", "w") as f:
+            f.writelines(annotations)
+
+# helper methods
 def get_random_char():
     return random.choice(characters)
 
@@ -36,6 +55,95 @@ def process_final_image(img):
     for i, var in enumerate(variations):
         filename = f"outputs/output_variation_{i+1}.jpg"
         cv2.imwrite(filename, var)
+def process_variation(base_image_cv, augmented_letters, variation_idx, brightness, contrast, saturation):
+    """Process a single variation with thread-safe saving"""
+    # Apply color transformations
+    variation = base_image_cv.copy()
+    variation = cv2.convertScaleAbs(variation, alpha=contrast, beta=int((brightness - 1) * 50))
+    
+    # Adjust saturation
+    hsv = cv2.cvtColor(variation, cv2.COLOR_BGR2HSV)
+    hsv[:, :, 1] = cv2.multiply(hsv[:, :, 1], saturation)
+    variation = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    
+    # Generate segmentation annotations
+    annotations = []
+    for letter, orig_x, orig_y, char in augmented_letters:
+        # Create blank mask
+        mask = Image.new('L', (WIDTH, HEIGHT), 0)
+        alpha = letter.split()[3]  # Get alpha channel
+        
+        # Calculate paste coordinates (same as image generation)
+        paste_x = orig_x - letter.width // 2
+        paste_y = orig_y - letter.height // 2
+        paste_x = max(0, min(paste_x, WIDTH - letter.width))
+        paste_y = max(0, min(paste_y, HEIGHT - letter.height))
+        
+        # Paste character mask
+        mask.paste(alpha, (paste_x, paste_y), alpha)
+        
+        # Convert to numpy array and find contours
+        mask_np = np.array(mask)
+        contours, _ = cv2.findContours(mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            contour = max(contours, key=cv2.contourArea)
+            epsilon = 0.005 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            
+            # Normalize coordinates (0-1 range for YOLO format)
+            normalized_points = [f"{point[0][0]/WIDTH:.6f} {point[0][1]/HEIGHT:.6f}" 
+                               for point in approx]
+            
+            # Get class ID and format annotation line
+            class_id = char_to_class[char]
+            annotations.append(f"{class_id} {' '.join(normalized_points)}\n")
+    
+    # Generate unique filename
+    file_id = str(uuid.uuid4())[:8]
+    
+    # Thread-safe file saving
+    thread_safe_save(variation, annotations, file_id, variation_idx)
+
+def save_with_annotations(image_cv, augmented_letters):
+    """Generate and save all 27 variations with parallel processing"""
+    # First create the base image with all letters
+    pil_image = Image.fromarray(cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB))
+    
+    for letter, x, y, char in augmented_letters:
+        # Adjust position to center the rotated letter
+        paste_x = x - letter.width // 2
+        paste_y = y - letter.height // 2
+        
+        # Ensure the letter fits within image bounds
+        paste_x = max(0, min(paste_x, WIDTH - letter.width))
+        paste_y = max(0, min(paste_y, HEIGHT - letter.height))
+        
+        pil_image.paste(letter, (paste_x, paste_y), letter)
+    
+    # Convert to OpenCV format for variations
+    base_image_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    
+    # Generate all possible combinations of parameters
+    params = list(product([0.5, 1.0, 1.5], repeat=3))
+    
+    # Process variations in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = []
+        for i, (brightness, contrast, saturation) in enumerate(params):
+            futures.append(
+                executor.submit(
+                    process_variation,
+                    base_image_cv,
+                    augmented_letters,
+                    i,
+                    brightness,
+                    contrast,
+                    saturation
+                )
+            )
+        # Wait for all variations to complete
+        concurrent.futures.wait(futures)
 
 def main():
     
@@ -99,14 +207,13 @@ def main():
         
         # Apply rotation to the augmented letter
         rotated = augmented_letter_pil.rotate(rotation, expand=True)
-        
-        augmented_letters.append((rotated, x, y))
+        augmented_letters.append((rotated, x, y, char)) 
 
 
     """ STEP 4. ADD AUGMENTED LETTERS TO IMAGE"""
     pil_image = Image.fromarray(cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB))
     
-    for letter, x, y in augmented_letters:
+    for letter, x, y, char in augmented_letters:
         # Adjust position to center the rotated letter
         paste_x = x - letter.width // 2
         paste_y = y - letter.height // 2
@@ -120,9 +227,12 @@ def main():
     image_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
     
     """ STEP X: PROCESS IMAGE WITH MULTIPLE VARIATIONS """
-    # process final created image
-    process_final_image(image_cv)
+    # process final created image and save
+    save_with_annotations(image_cv, augmented_letters)
     
 
 if __name__ == "__main__":
-    main()
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = [executor.submit(main) for _ in range(1500)]
+        for _ in tqdm(concurrent.futures.as_completed(futures), total=1500):
+            pass

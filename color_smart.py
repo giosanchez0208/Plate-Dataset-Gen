@@ -46,7 +46,7 @@ def get_average_color_in_region(image, x, y, width, height):
     
     return tuple(map(int, avg_color))
 
-def get_readable_color(background_color, min_contrast=2.5):
+def get_readable_color(background_color, min_contrast=5):
     """Generate a barely legible color based on background - light colors for dark backgrounds, dark colors for light backgrounds"""
     bg_luminance = calculate_luminance(background_color)
     

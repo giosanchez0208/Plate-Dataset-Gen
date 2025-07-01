@@ -8,8 +8,8 @@ class LicensePlateAugmentations:
     def __init__(self):
         # Augmentation probabilities - tune these based on your needs
         self.probabilities = {
-            'motion_blur': 0.3,
-            'normal_blur': 0.25,
+            'motion_blur': 0.4,
+            'normal_blur': 0.4,
             'partial_block': 0.2,
             'pixelate': 0.15,
             'shine': 0.25,

@@ -169,8 +169,8 @@ def main():
 
     for _ in range(num_letters):
         char = get_random_char()
-        font_size = random.randint(15, 60)
-        rotation = random.randint(-45, 45)
+        font_size = random.randint(25, 100)
+        rotation = random.randint(-20, 20)
         
         # Choose position first
         x = random.randint(100, WIDTH-100)

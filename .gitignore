@@ -1,4 +1,4 @@
 .venv
-backgrounds
-fonts
 outputs
+__pycache__
+dataset

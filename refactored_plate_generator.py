@@ -5,21 +5,12 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageChops
 import numpy as np
 import cv2
 
-# Directories
-OUTPUT_DIR = 'dataset'
-IMAGES_DIR = os.path.join(OUTPUT_DIR, 'images')
-LABELS_DIR = os.path.join(OUTPUT_DIR, 'labels')
-MASKS_DIR = os.path.join(OUTPUT_DIR, 'masks')
+# Directories (only needed for assets)
 FONTS_DIR = 'fonts'
 RIZAL_BG_PATH = os.path.join('assets', 'rizal.png')
 OBSCURATIONS_DIR = os.path.join('assets', 'obscurations')
 MARGIN = 5
 OFFSET = 4
-
-# Ensure dirs
-os.makedirs(IMAGES_DIR, exist_ok=True)
-os.makedirs(LABELS_DIR, exist_ok=True)
-os.makedirs(MASKS_DIR, exist_ok=True)
 
 # Config
 COLOR_PAIRS = [
@@ -127,24 +118,13 @@ def create_plate(id):
     d_fg.rectangle([x_start-bw, y-bw-vpad, x_start+tw+bw, y+th+bw+vpad], outline=tc, width=bw)
     d_fg.text((x_start, y-OFFSET), text, font=font, fill=tc, spacing=spacing)
 
-    # Effects
-    fg = white_stroke(fg, width=1)
-    fg = drop_shadow(fg, offset=(2,2), blur=1, alpha=90)
-    fg = deterioration(fg, chips=random.randint(5,10))
-    fg = directional_emboss(fg, angle=random.choice([60,120,180]), depth=1.2)
-    
-    plate = Image.alpha_composite(bg, fg)
-    plate = apply_natural_obscurations(plate)
-    plate_rgb = plate.convert('RGB')
-
-    name = f'plate_{id:05d}.jpg'
-    plate_rgb.save(os.path.join(IMAGES_DIR, name))
-
-    masks = []
-    labels = []
+    # Apply random opacity augmentation to individual characters
+    char_masks = []
     for i in range(len(text)):
         if text[i] == ' ': 
             continue
+            
+        # Create masks for this character (same as original logic)
         full = Image.new('L', (w, h), 0)
         part = Image.new('L', (w, h), 0)
         d_full = ImageDraw.Draw(full)
@@ -155,24 +135,31 @@ def create_plate(id):
         kernel = np.ones((3, 3), np.uint8)
         dilated = cv2.dilate(np.array(diff), kernel, iterations=1)
         mask = Image.fromarray(dilated)
-        masks.append((text[i], mask))
-        mask.save(os.path.join(MASKS_DIR, name.replace('.jpg', f'_char_{i}.png')))
+        
+        # Apply random opacity to this character
+        opacity = random.uniform(0.7, 1.0)
+        fg_array = np.array(fg)
+        mask_array = np.array(mask)
+        
+        # Reduce opacity of pixels belonging to this character
+        char_pixels = mask_array > 0
+        fg_array[char_pixels, 3] = (fg_array[char_pixels, 3] * opacity).astype(np.uint8)
+        fg = Image.fromarray(fg_array, 'RGBA')
+        
+        char_masks.append((text[i], mask))
 
-        np_mask = np.array(mask)
-        ys, xs = np.where(np_mask > 0)
-        if len(xs) > 0 and len(ys) > 0:
-            x0, x1 = xs.min(), xs.max()
-            y0, y1 = ys.min(), ys.max()
-            cx = ((x0 + x1) / 2) / w
-            cy = ((y0 + y1) / 2) / h
-            cw = (x1 - x0) / w
-            ch = (y1 - y0) / h
-            labels.append(f"0 {cx:.6f} {cy:.6f} {cw:.6f} {ch:.6f}")
+    # Apply effects
+    fg = white_stroke(fg, width=1)
+    fg = drop_shadow(fg, offset=(2,2), blur=1, alpha=90)
+    fg = deterioration(fg, chips=random.randint(5,10))
+    fg = directional_emboss(fg, angle=random.choice([60,120,180]), depth=1.2)
+    
+    plate = Image.alpha_composite(bg, fg)
+    plate = apply_natural_obscurations(plate)
+    plate_rgb = plate.convert('RGB')
 
-    with open(os.path.join(LABELS_DIR, name.replace('.jpg','.txt')), 'w') as f:
-        f.write("\n".join(labels))
-
-    return plate_rgb, masks
+    # Return plate and character masks (no file saving)
+    return plate_rgb, char_masks
 
 def generate_random_plate():
     return create_plate(int(time_import.time()*1000) % 100000)

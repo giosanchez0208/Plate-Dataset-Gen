@@ -9,6 +9,7 @@ import cv2
 FONTS_DIR = 'fonts'
 RIZAL_BG_PATH = os.path.join('assets', 'rizal.png')
 OBSCURATIONS_DIR = os.path.join('assets', 'obscurations')
+OBSCURATIONS_SMALL_DIR = os.path.join('assets', 'obscurations_small') 
 MARGIN = 5
 OFFSET = 4
 
@@ -17,12 +18,13 @@ COLOR_PAIRS = [
     ('#FFFFFF','#E35205'),('#FFFFFF','#000000'),('#FFFFFF',"#022B17"),('#FFFFFF','#F90000'),
     ('#FFFFFF','#062964'),('#F6C60D','#000000'),('#FFA500','#000000'),('#0A47AD','#000000')
 ]
-FORMATS = ['LLL DDDD','LLL DDD','LL DDDD','DLL DDD','LL DDDDD']
+FORMATS = ['LLL DDDD','LLL DDD','LL DDDD','DLL DDD','LL DDDDD', 'DDDD DDDDDDD']
 ASPECT_RATIOS = {'car':2.79,'motorcycle':1.74}
 font_files = [os.path.join(FONTS_DIR,f) for f in os.listdir(FONTS_DIR) if f.lower().endswith(('.ttf','.otf'))]
 if not font_files: raise RuntimeError(f"No font files in {FONTS_DIR}")
 obscuration_files = [os.path.join(OBSCURATIONS_DIR,f) for f in os.listdir(OBSCURATIONS_DIR) if f.lower().endswith(('.png','.jpg','.jpeg'))] if os.path.exists(OBSCURATIONS_DIR) else []
-
+obscuration_files = [os.path.join(OBSCURATIONS_DIR,f) for f in os.listdir(OBSCURATIONS_DIR) if f.lower().endswith(('.png','.jpg','.jpeg'))] if os.path.exists(OBSCURATIONS_DIR) else []
+obscuration_small_files = [os.path.join(OBSCURATIONS_SMALL_DIR,f) for f in os.listdir(OBSCURATIONS_SMALL_DIR) if f.lower().endswith(('.png','.jpg','.jpeg'))] if os.path.exists(OBSCURATIONS_SMALL_DIR) else []
 # Effects
 
 def directional_emboss(fg, angle=135, depth=1.0):
@@ -91,9 +93,11 @@ def create_plate(id):
     bgc, tc = random.choice(COLOR_PAIRS)
     if random.random() < 0.1 and os.path.exists(RIZAL_BG_PATH):
         bg = Image.open(RIZAL_BG_PATH).convert('RGBA').resize((w,h))
-        tc = '#047d61'
+        tc = "#012C23"
+        plate_bg_color = '#F0F0F0'  # Off-white for Rizal background
     else:
         bg = Image.new('RGBA', (w,h), bgc)
+        plate_bg_color = bgc
 
     text = generate_plate_text()
     fs = h
@@ -118,13 +122,11 @@ def create_plate(id):
     d_fg.rectangle([x_start-bw, y-bw-vpad, x_start+tw+bw, y+th+bw+vpad], outline=tc, width=bw)
     d_fg.text((x_start, y-OFFSET), text, font=font, fill=tc, spacing=spacing)
 
-    # Apply random opacity augmentation to individual characters
     char_masks = []
     for i in range(len(text)):
         if text[i] == ' ': 
             continue
             
-        # Create masks for this character (same as original logic)
         full = Image.new('L', (w, h), 0)
         part = Image.new('L', (w, h), 0)
         d_full = ImageDraw.Draw(full)
@@ -136,19 +138,65 @@ def create_plate(id):
         dilated = cv2.dilate(np.array(diff), kernel, iterations=1)
         mask = Image.fromarray(dilated)
         
-        # Apply random opacity to this character
         opacity = random.uniform(0.7, 1.0)
         fg_array = np.array(fg)
         mask_array = np.array(mask)
-        
-        # Reduce opacity of pixels belonging to this character
         char_pixels = mask_array > 0
         fg_array[char_pixels, 3] = (fg_array[char_pixels, 3] * opacity).astype(np.uint8)
         fg = Image.fromarray(fg_array, 'RGBA')
         
         char_masks.append((text[i], mask))
 
-    # Apply effects
+    # Apply small obscurations to individual letters
+    if obscuration_small_files and random.random() < 0.7:
+        for idx, (char, mask) in enumerate(char_masks):
+            if char == ' ' or random.random() > 0.3:
+                continue
+                
+            overlay_path = random.choice(obscuration_small_files)
+            try:
+                bbox = mask.getbbox()
+                if not bbox: continue
+                
+                overlay = Image.open(overlay_path).convert('RGBA')
+                w_bb, h_bb = bbox[2]-bbox[0], bbox[3]-bbox[1]
+                
+                # Scale to letter height
+                scale_factor = h_bb / overlay.height
+                new_size = (int(overlay.width * scale_factor), h_bb)
+                overlay = overlay.resize(new_size, Image.LANCZOS)
+                
+                # Use subtraction blend mode for black obscurations
+                overlay_arr = np.array(overlay)
+                alpha = overlay_arr[:, :, 3]
+                
+                # Create subtraction effect - where overlay is opaque, subtract from fg
+                subtraction_layer = np.zeros_like(overlay_arr)
+                subtraction_layer[:, :, 3] = alpha
+                subtraction_overlay = Image.fromarray(subtraction_layer, 'RGBA')
+                
+                pos = (
+                    bbox[0] + (w_bb - new_size[0]) // 2,
+                    bbox[1] + (h_bb - new_size[1]) // 2
+                )
+                
+                # Create positioned overlay
+                positioned_overlay = Image.new('RGBA', fg.size, (0,0,0,0))
+                positioned_overlay.paste(subtraction_overlay, pos)
+                
+                # Apply subtraction blend - darken the fg where overlay alpha is present
+                fg_arr = np.array(fg)
+                pos_arr = np.array(positioned_overlay)
+                
+                # Where overlay has alpha, reduce the fg alpha (creating holes/darkening)
+                alpha_mask = pos_arr[:, :, 3] > 0
+                fg_arr[alpha_mask, 3] = (fg_arr[alpha_mask, 3] * (1 - pos_arr[alpha_mask, 3] / 255.0)).astype(np.uint8)
+                
+                fg = Image.fromarray(fg_arr, 'RGBA')
+                
+            except Exception as e:
+                continue
+
     fg = white_stroke(fg, width=1)
     fg = drop_shadow(fg, offset=(2,2), blur=1, alpha=90)
     fg = deterioration(fg, chips=random.randint(5,10))
@@ -158,7 +206,6 @@ def create_plate(id):
     plate = apply_natural_obscurations(plate)
     plate_rgb = plate.convert('RGB')
 
-    # Return plate and character masks (no file saving)
     return plate_rgb, char_masks
 
 def generate_random_plate():

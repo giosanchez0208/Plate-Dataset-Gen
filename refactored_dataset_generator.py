@@ -4,6 +4,7 @@ import numpy as np
 import cv2
 from PIL import Image
 from refactored_plate_generator import generate_random_plate
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration constants
 BACKGROUND_DIR = 'backgrounds'
@@ -14,8 +15,8 @@ LBL_OUT = os.path.join(OUTPUT_DIR, 'labels')
 CANVAS_SIZE = (512, 512)
 SCALE_RANGE = (0.20, 1) 
 ROTATION_RANGE = (-45, 45)
-PERSPECTIVE_STRENGTH = 0.30
-SHEAR_RANGE = (-0.15, 0.15) 
+PERSPECTIVE_STRENGTH = 0.26
+SHEAR_RANGE = (-0.25, 0.25) 
 BLUR_RANGE = (0, 1) 
 NOISE_INTENSITY = 0.0 
 PERSPECTIVE_PROB = 0.25 
@@ -24,15 +25,18 @@ BLUR_PROB = 0.25
 NOISE_PROB = 0.0
 PADDING_FACTOR = 3.0
 
-# New motion blur and downscale/upscale parameters
+
 MOTION_BLUR_PROB = 0.3
-MOTION_BLUR_LENGTH_RANGE = (5, 15)  # Length of motion blur kernel
-MOTION_BLUR_ANGLE_RANGE = (0, 360)  # Angle of motion blur
+MOTION_BLUR_LENGTH_RANGE = (5, 18)  
+MOTION_BLUR_ANGLE_RANGE = (0, 360) 
 
 DOWNSCALE_UPSCALE_PROB = 0.4
-DOWNSCALE_FACTOR_RANGE = (0.3, 0.7)  # Scale down factor
+DOWNSCALE_FACTOR_RANGE = (0.4, 0.7) 
 
 BASIC_AUGMENTATION_PROB = 0.3  # 30% chance of basic augmentation only
+
+NUM_SAMPLES = 40_000
+MAX_WORKERS = 8  
 
 os.makedirs(IMG_OUT, exist_ok=True)
 os.makedirs(LBL_OUT, exist_ok=True)
@@ -300,6 +304,31 @@ def generate_yolo_segmentation_annotations(masks, image_shape):
     
     return lines
 
+def worker(idx: int):
+    """
+    Generate one sample: retries until transform_plate_and_masks returns
+    a valid (canvas, masks) pair, then writes image and label file.
+    """
+    while True:
+        plate, masks = generate_random_plate()
+        result = transform_plate_and_masks(plate, masks)
+        if result is None:
+            continue
+
+        canvas, final_masks = result
+        # Save image
+        img_name = f'aug_{idx:05d}.jpg'
+        img_path = os.path.join(IMG_OUT, img_name)
+        cv2.imwrite(img_path, cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
+
+        # Generate and save label
+        ann_lines = generate_yolo_segmentation_annotations(final_masks, canvas.shape)
+        lbl_path = os.path.join(LBL_OUT, img_name.replace('.jpg', '.txt'))
+        with open(lbl_path, 'w') as f:
+            f.write('\n'.join(ann_lines))
+
+        return idx  
+    
 def overlay_masks(image, masks):
     display_img = image.copy()
     for i, (ch, mask) in enumerate(masks):
@@ -312,35 +341,17 @@ def overlay_masks(image, masks):
         display_img[y, x] = display_img[y, x] * 0.7 + np.array(color_rgb) * 0.3
     return display_img.astype(np.uint8)
 
+def main():
+    print(f"Starting generation of {NUM_SAMPLES} samples with up to {MAX_WORKERS} threads...")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(worker, i): i for i in range(NUM_SAMPLES)}
+        for future in as_completed(futures):
+            idx_done = future.result()  # we could catch exceptions here
+            if idx_done % 1000 == 0:
+                print(f"...completed {idx_done} samples")
+
+    print("All done!")
+
+
 if __name__ == '__main__':
-    idx = 0
-    while True:
-        try:
-            plate, masks = generate_random_plate()
-            result = transform_plate_and_masks(plate, masks)
-            if result is None:
-                continue
-                
-            canvas, t_masks = result
-            
-            debug_img = overlay_masks(canvas.copy(), t_masks)
-            debug_img = cv2.cvtColor(debug_img, cv2.COLOR_RGB2BGR)
-            cv2.imshow('Augmented Plate', debug_img)
-            
-            key = cv2.waitKey(0)
-            if key != 32:  # Space bar
-                break
-
-            img_name = f'aug_{idx:05d}.jpg'
-            cv2.imwrite(os.path.join(IMG_OUT, img_name), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
-            ann = generate_yolo_segmentation_annotations(t_masks, canvas.shape)
-            with open(os.path.join(LBL_OUT, img_name.replace('.jpg','.txt')), 'w') as f:
-                f.write('\n'.join(ann))
-            idx += 1
-            print(f"Saved {img_name}")
-            
-        except Exception as e:
-            print(f"Error processing image {idx}: {e}")
-            break
-
-    cv2.destroyAllWindows()
+    main()

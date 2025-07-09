@@ -317,7 +317,7 @@ def worker(idx: int):
 
         canvas, final_masks = result
         # Save image
-        img_name = f'aug_{idx:05d}.jpg'
+        img_name = f'aug2_{idx:05d}.jpg'
         img_path = os.path.join(IMG_OUT, img_name)
         cv2.imwrite(img_path, cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
 

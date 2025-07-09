@@ -3,3 +3,5 @@ outputs
 __pycache__
 dataset
 augmented_dataset
+example
+augmented_dataset_hard
